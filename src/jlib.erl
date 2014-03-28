@@ -50,6 +50,7 @@
 	 jid_remove_resource/1,
 	 jid_replace_resource/2,
 	 get_iq_namespace/1,
+	 get_iq_namespace/2,
 	 iq_query_info/1,
 	 iq_query_or_response_info/1,
 	 is_iq_request_type/1,
@@ -70,6 +71,7 @@
 	 rsm_decode/1]).
 
 -include("jlib.hrl").
+-include("ejabberd.hrl").
 
 %send_iq(From, To, ID, SubTags) ->
 %    ok.
@@ -354,6 +356,47 @@ jid_replace_resource(JID, Resource) ->
     end.
 
 
+%%----------------------------------------------------------------------
+%% Function: get_iq_payload_name/1
+%% Purpose:  Get the tag name of an IQ payload
+%% Args:     xmlelement; an IQ
+%% Returns:  A string containing the tag name of the payload of the IQ if it exists, else an empty string
+%%----------------------------------------------------------------------
+get_iq_payload_name({xmlelement, Name, _Attrs, Els}) when Name == "iq" ->
+    case xml:remove_cdata(Els) of
+	[{xmlelement, Name2, _Attrs2, _Els2}] ->
+	    Name2;
+	_ ->
+	    ""
+    end;
+
+get_iq_payload_name(_) ->
+    "".
+
+%%----------------------------------------------------------------------
+%% Function: get_prefix/1
+%% Purpose: Get namespace prefixing of a packet, if present
+%% Args:    Packet = xmlelement;
+%% Returns: A string containing the namespace prefix, or a blank string if not present
+%%----------------------------------------------------------------------
+%% example:    would return "ns0"
+%% example:   would return ""
+get_prefix( Packet ) ->
+	Name = get_iq_payload_name( Packet ),
+	%erlang:display( Name ),
+	get_prefix( Name, "" ).
+	
+get_prefix( [], _ ) ->
+	"";
+
+get_prefix( [ Head | Tail ], Prefix ) ->
+	case [Head] of
+	":" -> % XML is prefixed...
+		Prefix;
+	_   -> % no prefix found
+		get_prefix( Tail, Prefix ++ [Head] )
+	end.
+
 get_iq_namespace({xmlelement, Name, _Attrs, Els}) when Name == "iq" ->
     case xml:remove_cdata(Els) of
 	[{xmlelement, _Name2, Attrs2, _Els2}] ->
@@ -364,6 +407,23 @@ get_iq_namespace({xmlelement, Name, _Attrs, Els}) when Name == "iq" ->
 get_iq_namespace(_) ->
     "".
 
+%%----------------------------------------------------------------------
+%% Function: get_iq_namespace/2
+%% Purpose:  Gets the namespace of a prefixed IQ payload
+%% Args:     xmlelement; an IQ
+%%			 string; the namespace prefix
+%% Returns:  A string containing the non-prefixed xmlns if present and the packet is an IQ, else an empty string
+%%----------------------------------------------------------------------
+get_iq_namespace({xmlelement, Name, _Attrs, Els}, Prefix) when Name == "iq" ->
+    case xml:remove_cdata(Els) of
+	[{xmlelement, _Name2, Attrs2, _Els2}] ->
+	    xml:get_attr_s("xmlns" ++ ":" ++ Prefix, Attrs2);
+	_ ->
+	    ""
+    end;
+get_iq_namespace(_, _Prefix) ->
+    "".
+
 %% @spec (xmlelement()) -> iq() | reply | invalid | not_iq
 
 iq_query_info(El) ->
@@ -372,7 +432,7 @@ iq_query_info(El) ->
 iq_query_or_response_info(El) ->
     iq_info_internal(El, any).
 
-iq_info_internal({xmlelement, Name, Attrs, Els}, Filter) when Name == "iq" ->
+iq_info_internal({xmlelement, Name, Attrs, Els} = Packet, Filter) when Name == "iq" ->
     %% Filter is either request or any.  If it is request, any replies
     %% are converted to the atom reply.
     ID = xml:get_attr_s("id", Attrs),
@@ -387,6 +447,7 @@ iq_info_internal({xmlelement, Name, Attrs, Els}, Filter) when Name == "iq" ->
 		     end,
     if
 	Type1 == invalid ->
+        ?DEBUG("invalid Type ~n", []),
 	    invalid;
 	Class == request; Filter == any ->
 	    %% The iq record is a bit strange.  The sub_el field is an
@@ -395,9 +456,14 @@ iq_info_internal({xmlelement, Name, Attrs, Els}, Filter) when Name == "iq" ->
 	    FilteredEls = xml:remove_cdata(Els),
 	    {XMLNS, SubEl} =
 		case {Class, FilteredEls} of
-		    {request, [{xmlelement, _Name2, Attrs2, _Els2}]} ->
-			{xml:get_attr_s("xmlns", Attrs2),
-			 hd(FilteredEls)};
+		    {request, [{xmlelement, _Name2, _Attrs2, _Els2}]} ->
+			Prefix = get_prefix( Packet ),
+			if 
+				Prefix == "" -> FilteredNs = get_iq_namespace( Packet );
+				true		 -> FilteredNs = get_iq_namespace( Packet, Prefix )
+			end,
+            ?DEBUG("==== result:Prefix:~p FilteredNs:~p HD:~p ~n", [Prefix, FilteredNs, hd(FilteredEls)]),
+            {FilteredNs, hd(FilteredEls)};
 		    {reply, _} ->
 			%% Find the namespace of the first non-error
 			%% element, if there is one.
